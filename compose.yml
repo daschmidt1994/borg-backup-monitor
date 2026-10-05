@@ -1,0 +1,56 @@
+# Borg Backup Monitor – docker compose
+#
+#   Demo (Beispieldaten):   docker compose --profile demo up -d demo
+#                           → http://localhost:8081  (demo / demo)
+#   Betrieb:                docker compose up -d
+#                           → http://localhost:8080
+#
+# Verzeichnisse neben dieser Datei:
+#   config/config.yaml   Konfiguration (Vorlage: config/config.example.yaml)
+#   secrets/             Repository-Passwörter, SSH-Schlüssel, known_hosts (nur lesbar eingebunden)
+#   data/                Zustand (state.json), Borg-Cache, Restore-Test-Verzeichnisse
+services:
+  borg-monitor:
+    build: .
+    image: borg-backup-monitor:local
+    container_name: borg-monitor
+    restart: unless-stopped
+    # Benutzer, der die Secrets und lokale Repositorys lesen darf
+    user: "${BBM_UID:-1000}:${BBM_GID:-1000}"
+    ports:
+      # nur lokal erreichbar; nach außen über einen Reverse-Proxy mit HTTPS
+      - "${BBM_PORT:-127.0.0.1:8080}:8080"
+    environment:
+      TZ: ${TZ:-Europe/Vienna}
+      BBM_DEBUG: ${BBM_DEBUG:-0}
+    volumes:
+      - ./config:/config:ro
+      - ./secrets:/secrets:ro
+      - ./data:/data
+      # lokale Repositorys immer nur lesend einbinden, z. B.:
+      # - /mnt/usb-backup/borg:/repos/usb:ro
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: ${BBM_MEM_LIMIT:-1g}
+    pids_limit: 256
+
+  demo:
+    profiles: [demo]
+    build: .
+    image: borg-backup-monitor:local
+    container_name: borg-monitor-demo
+    command: ["-demo"]
+    ports:
+      - "${BBM_DEMO_PORT:-127.0.0.1:8081}:8080"
+    environment:
+      TZ: ${TZ:-Europe/Vienna}
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true

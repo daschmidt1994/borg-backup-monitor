@@ -1,0 +1,93 @@
+# Borg Backup Monitor – Beispielkonfiguration
+#
+# Kopieren nach config/config.yaml und anpassen. Prüfen mit:
+#   docker compose run --rm borg-monitor -check-config
+#
+# Diese Datei beschreibt NUR das Monitoring: was beobachtet wird und wie es
+# bewertet wird. Zeitpläne und borgmatic-Konfigurationen bleiben, wo sie sind.
+
+listen: "0.0.0.0:8080"          # im Container; nach außen regelt compose.yml den Port
+data_dir: /data
+public_url: https://backup-monitor.example.com   # erscheint in den Ping-Adressen für borgmatic
+time_zone: Europe/Vienna        # Borg 1.x liefert Zeiten ohne Zeitzone – in welcher sie gemeint sind
+
+auth:
+  session_hours: 12
+  # secure_cookie: true         # Standard: true, wenn public_url mit https:// beginnt
+  users:
+    # Hash erzeugen: docker compose run --rm borg-monitor -hash-password
+    - name: admin
+      password_hash: "$2a$12$ERSETZEN.DURCH.DEN.ERZEUGTEN.HASH....................."
+
+borg:
+  binary: borg                  # im Image: Borg 1.4 (Alpine); eigener Pfad für Borg 2 möglich
+  timeout: 60s                  # Grenze je Abfrage
+  refresh_interval: 15m         # wie oft die Archivliste gelesen wird (borg list – nur Manifest, günstig)
+  sizes_interval: 0             # borg info für Größen; braucht den Borg-Cache (teuer beim ersten Mal) – 0 = nie
+  max_parallel: 2               # gleichzeitige borg-Aufrufe
+  bypass_lock: auto             # auto: --bypass-lock, wenn borg es kann → blockiert nie ein laufendes Backup
+  manual_cooldown: 1m           # Mindestabstand für „Jetzt abfragen“
+
+defaults:
+  interval: 1d                  # erwartetes Backup-Intervall (nur Monitoring)
+  tolerance: 6h                 # Kulanz, bevor „überfällig“ gemeldet wird
+  running_warn_after: 8h        # „läuft“ länger als das → Warnung
+  restore_test_max_age: 30d     # danach gilt ein Restore-Test als veraltet
+
+restore:
+  enabled: true                 # Restore-Tests überhaupt erlauben (je Job abschaltbar)
+  base_dir: /data/restore-tests # hier entsteht je Test ein neues, privates Verzeichnis
+  max_bytes: 500MB
+  max_files: 1000
+  timeout: 10m
+  memory_max: 2GiB              # Adressraum-Grenze für borg extract (prlimit, im Image enthalten)
+  keep_files: false             # wiederhergestellte Dateien nach dem Test löschen
+
+hosts:
+  - name: nas
+    jobs:
+      - name: system                         # entspricht einer borgmatic-Konfiguration
+        description: /etc, /home, Docker-Volumes
+        ping_token: ERSETZEN-docker-compose-run-borg-monitor-new-token
+        interval: 1d
+        tolerance: 6h
+        repositories:
+          - name: storagebox
+            location: ssh://u123456@u123456.your-storagebox.de:23/./borg/nas
+            passphrase_file: /secrets/nas.pass           # nur der Inhalt, eine Zeile
+            ssh_key: /secrets/id_ed25519_monitor         # am Speicherziel möglichst nur lesend freigeben
+            known_hosts: /secrets/known_hosts            # ssh-keyscan -p 23 u123456.your-storagebox.de
+          - name: usb-platte
+            location: /repos/usb/nas                      # in compose.yml lesend eingebunden
+            passcommand: "cat /secrets/nas-usb.pass"     # alternativ zu passphrase_file
+        restore_test:
+          # unabhängige Referenz: Prüfsummen, auf dem Quellsystem erzeugt, z. B.
+          #   cd / && sha256sum etc/hostname etc/fstab home/anna/wichtig/* > nas-sha256.txt
+          reference_checksums: /secrets/nas-sha256.txt
+          # oder Vergleich mit Originaldateien, die (nur lesend) eingebunden sind:
+          # compare_root: /originals/nas
+
+  - name: webserver
+    jobs:
+      - name: www
+        ping_token: ERSETZEN-zweiter-token-mit-new-token
+        interval: 12h
+        tolerance: 2h
+        repositories:
+          - name: borgbase
+            location: ssh://abcd1234@abcd1234.repo.borgbase.com/./repo
+            passphrase_file: /secrets/web.pass
+            ssh_key: /secrets/id_ed25519_monitor
+            known_hosts: /secrets/known_hosts
+            remote_path: borg1               # falls auf dem Server so benannt
+        restore_test:
+          enabled: false                     # für diesen Job keine Restore-Tests
+
+  - name: laptop
+    jobs:
+      - name: home
+        ping_token: ERSETZEN-dritter-token-mit-new-token
+        repositories:
+          - name: nas-repo
+            location: ssh://borg@nas.local/./laptop
+            query: false                     # Repository nicht abfragen – nur borgmatic-Meldungen auswerten

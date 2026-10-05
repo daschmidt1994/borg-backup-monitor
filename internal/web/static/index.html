@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>Borg Backup Monitor</title>
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="style.css">
+  <script type="module" src="app.js"></script>
+</head>
+<body>
+  <a class="skip" href="#main">Zum Inhalt springen</a>
+  <div id="demo-banner" class="demo-banner" hidden>
+    <strong>Demo-Modus</strong> – alle Hosts, Läufe und Archive sind Beispieldaten. Es wird auf kein echtes Repository zugegriffen.
+  </div>
+  <header class="topbar">
+    <a class="brand" href="#/" aria-label="Zur Übersicht">
+      <svg viewBox="0 0 32 32" aria-hidden="true" class="brand-mark"><rect x="3" y="7" width="26" height="20" rx="4"/><path d="M3 13h26M9 18h6M9 22h10"/><circle cx="23.5" cy="20" r="2.5"/></svg>
+      <span>Borg Backup Monitor</span>
+    </a>
+    <div class="topbar-right" id="topbar-right" hidden>
+      <span class="freshness" id="freshness" title="Wann die Daten zuletzt aktualisiert wurden"></span>
+      <button class="icon-btn" id="theme-btn" type="button" title="Hell/Dunkel umschalten" aria-label="Hell/Dunkel umschalten"></button>
+      <button class="btn ghost" id="logout-btn" type="button">Abmelden</button>
+    </div>
+  </header>
+  <main id="main" tabindex="-1">
+    <section id="view" aria-live="polite"></section>
+  </main>
+  <footer class="foot">Nur Monitoring: diese Anwendung erstellt, löscht oder verändert keine Backups. Einzige aktive Funktion ist der kontrollierte Restore-Test.</footer>
+</body>
+</html>
