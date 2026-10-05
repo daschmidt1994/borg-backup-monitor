@@ -121,6 +121,36 @@ type RepoSnapshot struct {
 	SizesError    string     `json:"sizes_error,omitempty"`
 	BorgVersion   string     `json:"borg_version,omitempty"`
 	QueryDuration float64    `json:"query_seconds,omitempty"`
+	Coverage      *Coverage  `json:"coverage,omitempty"`
+}
+
+// Coverage: were the expected sources in the newest archive?
+type Coverage struct {
+	Archive   string         `json:"archive"`
+	CheckedAt time.Time      `json:"checked_at"`
+	Paths     []CoveragePath `json:"paths"`
+	Error     string         `json:"error,omitempty"`
+}
+
+type CoveragePath struct {
+	Path    string `json:"path"`
+	Present bool   `json:"present"`
+	Entries int    `json:"entries"` // counted up to a small limit
+	Empty   bool   `json:"empty"`
+}
+
+// CheckResult: one borg check run.
+type CheckResult struct {
+	ID         string     `json:"id"`
+	RepoID     string     `json:"repo_id"`
+	StartedAt  time.Time  `json:"started_at"`
+	FinishedAt *time.Time `json:"finished_at,omitempty"`
+	State      string     `json:"state"` // running | passed | failed
+	Mode       string     `json:"mode"`
+	Trigger    string     `json:"trigger"` // zeitplan | manuell
+	ExitCode   *int       `json:"exit_code,omitempty"`
+	Findings   []Finding  `json:"findings,omitempty"`
+	Log        string     `json:"log,omitempty"`
 }
 
 func (s *RepoSnapshot) SetArchives(list []Archive) {
@@ -176,6 +206,8 @@ type State struct {
 	Runs         map[string][]*Run        `json:"runs"`  // job id → newest last
 	Repos        map[string]*RepoSnapshot `json:"repos"` // repo id
 	RestoreTests []*RestoreTest           `json:"restore_tests"`
+	Checks       []*CheckResult           `json:"checks,omitempty"`
+	Notified     map[string]string        `json:"notified,omitempty"` // repo id → last notified level
 }
 
 type Store struct {
@@ -185,7 +217,7 @@ type Store struct {
 }
 
 func Open(path string) (*Store, error) {
-	s := &Store{path: path, state: State{Runs: map[string][]*Run{}, Repos: map[string]*RepoSnapshot{}}}
+	s := &Store{path: path, state: State{Runs: map[string][]*Run{}, Repos: map[string]*RepoSnapshot{}, Notified: map[string]string{}}}
 	if path == "" {
 		return s, nil // in memory (demo, tests)
 	}
@@ -204,6 +236,9 @@ func Open(path string) (*Store, error) {
 	}
 	if s.state.Repos == nil {
 		s.state.Repos = map[string]*RepoSnapshot{}
+	}
+	if s.state.Notified == nil {
+		s.state.Notified = map[string]string{}
 	}
 	return s, nil
 }
@@ -229,6 +264,9 @@ func (s *Store) trim() {
 		if len(runs) > maxRunsPerJob {
 			s.state.Runs[id] = append([]*Run(nil), runs[len(runs)-maxRunsPerJob:]...)
 		}
+	}
+	if n := len(s.state.Checks); n > maxRestoreTests {
+		s.state.Checks = append([]*CheckResult(nil), s.state.Checks[n-maxRestoreTests:]...)
 	}
 	if n := len(s.state.RestoreTests); n > maxRestoreTests {
 		s.state.RestoreTests = append([]*RestoreTest(nil), s.state.RestoreTests[n-maxRestoreTests:]...)

@@ -8,6 +8,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"log/slog"
 	"sort"
 	"strings"
@@ -26,6 +27,8 @@ type Monitor struct {
 	Log     *slog.Logger
 	Demo    bool
 	Now     func() time.Time
+	// Notifier: messages on status changes (nil = off).
+	Notifier Notifier
 
 	mu       sync.Mutex
 	inflight map[string]bool
@@ -53,6 +56,8 @@ func (m *Monitor) Run(ctx context.Context) {
 			return
 		case <-t.C:
 			m.refreshDue(ctx)
+			m.checksDue()
+			m.notifyChanges(ctx)
 		}
 	}
 }
@@ -107,13 +112,16 @@ func (m *Monitor) refresh(ctx context.Context, repo *config.Repository) (*store.
 		snap.Error = &f
 		if old != nil { // keep the last known archives – shown as such, with their date
 			snap.LastGoodAt, snap.ArchiveCount, snap.Latest, snap.Recent = old.LastGoodAt, old.ArchiveCount, old.Latest, old.Recent
-			snap.Encryption, snap.Sizes, snap.LastModified = old.Encryption, old.Sizes, old.LastModified
+			snap.Encryption, snap.Sizes, snap.LastModified, snap.Coverage = old.Encryption, old.Sizes, old.LastModified, old.Coverage
 		}
 	} else {
 		t := snap.CheckedAt
 		snap.LastGoodAt = &t
 		if old != nil {
 			snap.Sizes, snap.SizesError = old.Sizes, old.SizesError
+		}
+		if ref, _, ok := m.Cfg.RepoByID(repo.ID); ok {
+			m.checkCoverage(ctx, ref.Job, repo, snap, old)
 		}
 		if iv := m.Cfg.Borg.SizesInterval.D(); iv > 0 && (snap.Sizes == nil || m.Now().Sub(snap.Sizes.At) > iv) {
 			if sz, serr := m.Backend.Sizes(ctx, repo); serr != nil {
@@ -293,35 +301,70 @@ type DayCell struct {
 }
 
 type Row struct {
-	RepoID         string        `json:"repo_id"`
-	JobID          string        `json:"job_id"`
-	Host           string        `json:"host"`
-	Job            string        `json:"job"`
-	Description    string        `json:"description,omitempty"`
-	Repo           string        `json:"repo"`
-	Location       string        `json:"location,omitempty"`
-	Queried        bool          `json:"queried"`
-	PingConfigured bool          `json:"ping_configured"`
-	Status         Status        `json:"status"`
-	IntervalSec    float64       `json:"interval_seconds"`
-	ToleranceSec   float64       `json:"tolerance_seconds"`
-	LastAttempt    *RunView      `json:"last_attempt,omitempty"`
-	LastFinished   *RunView      `json:"last_finished,omitempty"`
-	LastOK         *RunView      `json:"last_ok,omitempty"`
-	Running        *RunView      `json:"running,omitempty"`
-	LastSuccessAt  *time.Time    `json:"last_success_at,omitempty"`
-	SuccessSource  string        `json:"success_source,omitempty"`
-	AgeSec         *float64      `json:"age_seconds,omitempty"`
-	Archives       ArchivesView  `json:"archives"`
-	Restore        RestoreStatus `json:"restore"`
-	RestoreEnabled bool          `json:"restore_enabled"`
-	History        []DayCell     `json:"history"`
+	RepoID         string          `json:"repo_id"`
+	JobID          string          `json:"job_id"`
+	Host           string          `json:"host"`
+	Job            string          `json:"job"`
+	Description    string          `json:"description,omitempty"`
+	Repo           string          `json:"repo"`
+	Location       string          `json:"location,omitempty"`
+	Queried        bool            `json:"queried"`
+	PingConfigured bool            `json:"ping_configured"`
+	Status         Status          `json:"status"`
+	IntervalSec    float64         `json:"interval_seconds"`
+	ToleranceSec   float64         `json:"tolerance_seconds"`
+	LastAttempt    *RunView        `json:"last_attempt,omitempty"`
+	LastFinished   *RunView        `json:"last_finished,omitempty"`
+	LastOK         *RunView        `json:"last_ok,omitempty"`
+	Running        *RunView        `json:"running,omitempty"`
+	LastSuccessAt  *time.Time      `json:"last_success_at,omitempty"`
+	SuccessSource  string          `json:"success_source,omitempty"`
+	AgeSec         *float64        `json:"age_seconds,omitempty"`
+	Archives       ArchivesView    `json:"archives"`
+	Restore        RestoreStatus   `json:"restore"`
+	RestoreEnabled bool            `json:"restore_enabled"`
+	History        []DayCell       `json:"history"`
+	Check          CheckStatus     `json:"check"`
+	CheckPlan      string          `json:"check_plan,omitempty"`
+	AutoRestore    string          `json:"auto_restore,omitempty"`
+	Drift          *Drift          `json:"drift,omitempty"`
+	ExpectedPaths  []string        `json:"expected_paths,omitempty"`
+	Coverage       *store.Coverage `json:"coverage,omitempty"`
+}
+
+func checkPlan(c config.Check) string {
+	if !c.Enabled() {
+		return ""
+	}
+	s := "alle " + HumanInterval(c.Schedule.D()) + ", " + modeText(c.Mode)
+	if c.Last > 0 && c.Mode != "repository" {
+		s += fmt.Sprintf(" (neueste %d Archive)", c.Last)
+	}
+	if c.VerifyData {
+		s += ", mit Datenprüfung"
+	}
+	if c.Window != "" {
+		s += ", Zeitfenster " + c.Window
+	}
+	return s
+}
+
+func autoRestorePlan(rt config.RestoreTest, enabled bool) string {
+	if !enabled || rt.Schedule <= 0 {
+		return ""
+	}
+	s := fmt.Sprintf("alle %s je %d zufällige Dateien aus %s", HumanInterval(rt.Schedule.D()), rt.SampleFiles, strings.Join(rt.SamplePaths, ", "))
+	if rt.Window != "" {
+		s += ", Zeitfenster " + rt.Window
+	}
+	return s
 }
 
 type Summary struct {
 	Total   int            `json:"total"`
 	Levels  map[Level]int  `json:"levels"`
 	Restore map[string]int `json:"restore"`
+	Checks  map[string]int `json:"checks"`
 	// Oldest information any status rests on – how current the dashboard is.
 	OldestUpdate *time.Time `json:"oldest_update,omitempty"`
 	NewestUpdate *time.Time `json:"newest_update,omitempty"`
@@ -345,9 +388,17 @@ func (m *Monitor) rows(st *store.State, now time.Time) []Row {
 		for i := range j.Job.Repositories {
 			repo := &j.Job.Repositories[i]
 			snap := st.Repos[repo.ID]
+			var checks []*store.CheckResult
+			for _, c := range st.Checks {
+				if c.RepoID == repo.ID {
+					checks = append(checks, c)
+				}
+			}
+			cs := EvaluateCheck(now, checks, repo.Check)
 			e := Evaluate(EvalInput{Now: now, Interval: j.Job.Interval.D(), Tolerance: j.Job.Tolerance.D(),
 				RunningWarnAfter: m.Cfg.Defaults.RunningWarnAfter.D(), RefreshInterval: m.Cfg.Borg.RefreshInterval.D(),
-				Queried: repo.Queried(), PingConfigured: j.Job.PingToken != "", Runs: runs, Snap: snap})
+				Queried: repo.Queried(), PingConfigured: j.Job.PingToken != "", Runs: runs, Snap: snap,
+				ExpectedPaths: j.Job.ExpectedPaths, DriftThreshold: j.Job.DriftThreshold, Check: &cs})
 			var tests []*store.RestoreTest
 			for _, t := range st.RestoreTests {
 				if t.RepoID == repo.ID {
@@ -360,7 +411,12 @@ func (m *Monitor) rows(st *store.State, now time.Time) []Row {
 				Status: e.Status, IntervalSec: j.Job.Interval.D().Seconds(), ToleranceSec: j.Job.Tolerance.D().Seconds(),
 				LastAttempt: runView(e.LastAttempt), LastFinished: runView(e.LastFinished), LastOK: runView(e.LastOK),
 				Running: runView(e.Running), LastSuccessAt: e.LastSuccessAt, SuccessSource: e.SuccessSource,
-				Restore: EvaluateRestore(now, tests, j.Job.RestoreTest.MaxAge.D(), enabled), RestoreEnabled: enabled}
+				Restore: EvaluateRestore(now, tests, j.Job.RestoreTest.MaxAge.D(), enabled), RestoreEnabled: enabled,
+				Check: cs, Drift: computeDrift(runs, j.Job.DriftThreshold), ExpectedPaths: j.Job.ExpectedPaths,
+				CheckPlan: checkPlan(repo.Check), AutoRestore: autoRestorePlan(j.Job.RestoreTest, enabled)}
+			if snap != nil {
+				row.Coverage = snap.Coverage
+			}
 			if e.LastSuccessAt != nil {
 				a := now.Sub(*e.LastSuccessAt).Seconds()
 				row.AgeSec = &a
@@ -445,12 +501,13 @@ func history(now time.Time, runs []*store.Run, snap *store.RepoSnapshot) []DayCe
 func (m *Monitor) Overview(ctx context.Context) Overview {
 	now := m.Now()
 	ov := Overview{Demo: m.Demo, GeneratedAt: now, Borg: m.Backend.Detect(ctx), Prlimit: borg.HasPrlimit() || m.Demo,
-		Summary: Summary{Levels: map[Level]int{}, Restore: map[string]int{}}}
+		Summary: Summary{Levels: map[Level]int{}, Restore: map[string]int{}, Checks: map[string]int{}}}
 	m.Store.Read(func(st *store.State) { ov.Rows = m.rows(st, now) })
 	for _, r := range ov.Rows {
 		ov.Summary.Total++
 		ov.Summary.Levels[r.Status.Level]++
 		ov.Summary.Restore[r.Restore.State]++
+		ov.Summary.Checks[r.Check.State]++
 		if u := r.Status.UpdatedAt; u != nil {
 			if ov.Summary.OldestUpdate == nil || u.Before(*ov.Summary.OldestUpdate) {
 				ov.Summary.OldestUpdate = u
@@ -465,6 +522,7 @@ func (m *Monitor) Overview(ctx context.Context) Overview {
 
 type Detail struct {
 	Row          Row                  `json:"row"`
+	Checks       []*store.CheckResult `json:"checks"`
 	Runs         []*RunView           `json:"runs"`
 	RestoreTests []*store.RestoreTest `json:"restore_tests"`
 	PingURL      string               `json:"ping_url,omitempty"`
@@ -487,6 +545,12 @@ func (m *Monitor) Detail(repoID string) (*Detail, bool) {
 		runs := st.Runs[ref.Job.ID]
 		for i := len(runs) - 1; i >= 0 && len(d.Runs) < 60; i-- {
 			d.Runs = append(d.Runs, runView(runs[i]))
+		}
+		for i := len(st.Checks) - 1; i >= 0 && len(d.Checks) < 20; i-- {
+			if c := st.Checks[i]; c.RepoID == repo.ID {
+				x := *c
+				d.Checks = append(d.Checks, &x)
+			}
 		}
 		for i := len(st.RestoreTests) - 1; i >= 0 && len(d.RestoreTests) < 30; i-- {
 			if t := st.RestoreTests[i]; t.RepoID == repo.ID {

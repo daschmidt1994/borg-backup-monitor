@@ -15,6 +15,7 @@ type Backend interface {
 	Sizes(ctx context.Context, repo *config.Repository) (*store.Sizes, *Error)
 	Files(ctx context.Context, repo *config.Repository, archive, prefix string, max int) ([]Item, bool, *Error)
 	Extract(ctx context.Context, repo *config.Repository, spec ExtractSpec) (stderr string, code int, err error)
+	Check(ctx context.Context, repo *config.Repository) (stderr string, code int, err error)
 }
 
 var _ Backend = (*Runner)(nil)

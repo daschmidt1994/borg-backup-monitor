@@ -43,6 +43,13 @@ restore:
   memory_max: 2GiB              # Adressraum-Grenze für borg extract (prlimit, im Image enthalten)
   keep_files: false             # wiederhergestellte Dateien nach dem Test löschen
 
+# Meldungen bei Statuswechsel (schlechter oder wieder OK)
+notify:
+  ntfy_url: ""                 # z. B. https://ntfy.example.com/backups
+  ntfy_token_file: ""          # z. B. /secrets/ntfy.token
+  webhook_url: ""              # JSON-POST {title, message, level, url}
+  min_level: warning           # warning | error
+
 hosts:
   - name: nas
     jobs:
@@ -51,12 +58,23 @@ hosts:
         ping_token: ERSETZEN-docker-compose-run-borg-monitor-new-token
         interval: 1d
         tolerance: 6h
+        # Backup-Verifier: diese Pfade (so wie im Archiv, ohne führenden /)
+        # müssen in jedem neuen Archiv vorhanden und nicht leer sein –
+        # fällt auf, wenn ein Volume beim Backup nicht eingebunden war.
+        expected_paths: [etc, home, srv/docker-volumes]
+        drift_threshold: 0.3             # Warnung bei 30 % weniger Dateien als üblich (braucht --stats)
         repositories:
           - name: storagebox
             location: ssh://u123456@u123456.your-storagebox.de:23/./borg/nas
             passphrase_file: /secrets/nas.pass           # nur der Inhalt, eine Zeile
             ssh_key: /secrets/id_ed25519_monitor         # am Speicherziel möglichst nur lesend freigeben
             known_hosts: /secrets/known_hosts            # ssh-keyscan -p 23 u123456.your-storagebox.de
+            check:                                       # optionale Integritätsprüfung (borg check, nie --repair)
+              schedule: 7d
+              mode: archives                             # repository | archives | both
+              last: 3                                    # nur die neuesten 3 Archive
+              window: "10:00-16:00"                      # nur in diesem Zeitfenster, nie während eines Backups
+              timeout: 6h
           - name: usb-platte
             location: /repos/usb/nas                      # in compose.yml lesend eingebunden
             passcommand: "cat /secrets/nas-usb.pass"     # alternativ zu passphrase_file
@@ -64,6 +82,11 @@ hosts:
           # unabhängige Referenz: Prüfsummen, auf dem Quellsystem erzeugt, z. B.
           #   cd / && sha256sum etc/hostname etc/fstab home/anna/wichtig/* > nas-sha256.txt
           reference_checksums: /secrets/nas-sha256.txt
+          # automatische Stichproben: alle 7 Tage 5 zufällige Dateien aus dem neuesten Archiv
+          schedule: 7d
+          sample_paths: [home, etc]
+          sample_files: 5
+          window: "09:00-18:00"
           # oder Vergleich mit Originaldateien, die (nur lesend) eingebunden sind:
           # compare_root: /originals/nas
 

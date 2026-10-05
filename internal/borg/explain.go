@@ -51,6 +51,8 @@ type rule struct {
 }
 
 var rules = []rule{
+	{msgid: "", re: regexp.MustCompile(`(?i)Read-only file system`), level: "error",
+		summary: "Schreibgeschütztes Dateisystem", hint: "borg check braucht Schreibzugriff für die Repository-Sperre – das Repository für Prüfungen nicht nur lesend einbinden."},
 	{msgid: "Repository.DoesNotExist", re: regexp.MustCompile(`(?i)repository .* does not exist|Repository not found`), level: "error",
 		summary: "Repository nicht gefunden", hint: "Pfad/URL des Repositorys und die Erreichbarkeit des Speicherziels prüfen."},
 	{msgid: "Repository.InvalidRepository", re: regexp.MustCompile(`(?i)is not a valid repository`), level: "error",
@@ -77,7 +79,7 @@ var rules = []rule{
 	{msgid: "Repository.CheckNeeded", re: regexp.MustCompile(`(?i)check needed|Inconsistency detected`), level: "error",
 		summary: "Repository meldet Inkonsistenz – Prüfung nötig", hint: "Auf dem Backup-Host „borg check“ ausführen."},
 	{msgid: "Cache.RepositoryAccessAborted", re: regexp.MustCompile(`(?i)Repository access aborted`), level: "error",
-		summary: "Zugriff abgebrochen (Sicherheitsabfrage von borg)", hint: "Das Repository wurde verschoben oder ist unbekannt; auf dem Backup-Host prüfen."},
+		summary: "Zugriff abgebrochen (Sicherheitsabfrage von borg)", hint: "Das Repository liegt an einem anderen Ort als beim ersten Zugriff des Monitors (verschoben oder neu eingebunden?). Ist das gewollt, im Monitor den Ordner data/borg/.config/borg/security/<Repository-ID> löschen – der Monitor bestätigt das nie selbst."},
 	{msgid: "Cache.RepositoryReplay", re: regexp.MustCompile(`(?i)Cache is newer than repository|replay attack`), level: "error",
 		summary: "Cache ist neuer als das Repository – möglicher Rollback des Speicherziels", hint: "Unbedingt prüfen, ob das Repository aus einem alten Stand wiederhergestellt wurde."},
 	{msgid: "KeyfileNotFoundError", re: regexp.MustCompile(`(?i)No key file for repository|key file .* not found`), level: "error",
@@ -90,6 +92,8 @@ var rules = []rule{
 		summary: "Archiv nicht gefunden", hint: "Das Archiv wurde inzwischen vermutlich von borgmatic geprunt."},
 	{msgid: "", re: regexp.MustCompile(`(?i)Killed|MemoryError|Cannot allocate memory`), level: "error",
 		summary: "Speichermangel – Prozess beendet", hint: "Speicher des Hosts bzw. die Grenzen für borg prüfen."},
+	{msgid: "", re: regexp.MustCompile(`(?i)failedPrepareSourcePaths|prepare source paths|source director(y|ies) .*(does not|do not|don't) exist|Source directories? .* not found|source_directories_must_exist`), level: "error",
+		summary: "Quellverzeichnis fehlte beim Backup – ein Volume war vermutlich nicht eingebunden", hint: "Prüfen, ob alle Laufwerke/Volumes im borgmatic-Container eingebunden waren; die Sicherung ist unvollständig."},
 	{msgid: "", re: regexp.MustCompile(`(?i)file changed while we backed it up`), level: "warning",
 		summary: "Datei hat sich während der Sicherung geändert", hint: "Meist harmlos (Logs, Datenbanken). Für Datenbanken einen Dump sichern statt der Live-Dateien."},
 	{msgid: "", re: regexp.MustCompile(`(?i)\[Errno 13\] Permission denied|: Permission denied`), level: "warning",

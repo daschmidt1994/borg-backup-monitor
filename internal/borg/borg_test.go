@@ -180,3 +180,37 @@ func TestExitCodesAndSizes(t *testing.T) {
 		t.Error("ValidArchivePath")
 	}
 }
+
+func TestCheckArgsNeverRepair(t *testing.T) {
+	for _, c := range []config.Check{{Mode: "repository"}, {Mode: "archives", Last: 3}, {Mode: "both", VerifyData: true, Last: 2}} {
+		a := strings.Join(CheckArgs(c), " ")
+		if strings.Contains(a, "repair") || !strings.Contains(a, "--lock-wait") || strings.Contains(a, "bypass-lock") {
+			t.Fatalf("%+v: %s", c, a)
+		}
+	}
+	if a := strings.Join(CheckArgs(config.Check{Mode: "archives", Last: 3}), " "); a != "check --log-json --lock-wait 10 --archives-only --last 3" {
+		t.Fatalf("archives: %s", a)
+	}
+	if a := strings.Join(CheckArgs(config.Check{Mode: "repository", Last: 3}), " "); strings.Contains(a, "--last") {
+		t.Fatalf("--last with repository-only: %s", a)
+	}
+}
+
+func TestMissingSourceLogLines(t *testing.T) {
+	for _, l := range []string{
+		"ERROR failedPrepareSourcePaths: /source/anon",
+		"CRITICAL Source directories do not exist: /source/anon",
+	} {
+		f, _, hasErr, _ := AnalyzeLog(l)
+		if !hasErr || !strings.Contains(f[0].Summary, "Quellverzeichnis fehlte") {
+			t.Errorf("%q: %+v", l, f)
+		}
+	}
+}
+
+func TestReadOnlyBeatsLock(t *testing.T) {
+	f := Explain("", "Failed to create/acquire the lock /repo/lock.exclusive ([Errno 30] Read-only file system: '/repo/lock.exclusive.tmp')")
+	if f.Summary != "Schreibgeschütztes Dateisystem" {
+		t.Fatalf("got %q", f.Summary)
+	}
+}

@@ -72,6 +72,18 @@ const RESULT = {
   archive: { label: 'nur Archiv bekannt', icon: 'archive', cls: 'archive', sym: '▪' },
   none: { label: 'kein Lauf', icon: 'none', cls: 'none', sym: '–' },
 };
+const CHECK = {
+  passed: { label: 'Integrität ok', cls: 'lv-ok', icon: 'shield' },
+  failed: { label: 'Integrität fehlerhaft', cls: 'lv-error', icon: 'error' },
+  stale: { label: 'Prüfung überfällig', cls: 'lv-overdue', icon: 'overdue' },
+  never: { label: 'noch nicht geprüft', cls: 'lv-unknown', icon: 'unknown' },
+  running: { label: 'Prüfung läuft', cls: 'lv-running', icon: 'running' },
+  disabled: { label: 'keine Prüfung', cls: 'lv-info', icon: 'info' },
+};
+function checkBadge(state) {
+  const r = CHECK[state] || CHECK.disabled;
+  return h('span', { class: `badge ${r.cls}` }, icon(r.icon), r.label);
+}
 const RESTORE = {
   passed: { label: 'bestanden', cls: 'lv-ok', icon: 'shield' },
   'passed-unverified': { label: 'bestanden, ohne Referenz', cls: 'lv-warning', icon: 'shield' },
@@ -260,6 +272,8 @@ function overallCard(ov) {
   if (s.newest_update) notes.push(`Neueste Information ${ago(s.newest_update)}, älteste zugrunde liegende ${ago(s.oldest_update)}`);
   const tested = (s.restore.passed || 0) + (s.restore['passed-unverified'] || 0);
   notes.push(`Wiederherstellung aktuell getestet: ${tested} von ${total}`);
+  const planned = total - (s.checks.disabled || 0);
+  if (planned) notes.push(`Integrität geprüft: ${s.checks.passed || 0} von ${planned} mit Prüfplan`);
   const borg = ov.borg || {};
   const extra = [];
   if (borg.error) extra.push(h('div', { class: 'notice warn', role: 'alert' }, h('strong', { text: 'Borg nicht nutzbar: ' }), borg.error));
@@ -331,7 +345,7 @@ function tableCard(ov) {
       .map(([v, t]) => h('option', { value: v, selected: state.sort === v, text: t })));
   const reset = (state.filter.level || state.filter.restore || state.filter.host || state.filter.text)
     ? h('button', { class: 'btn ghost', type: 'button', text: 'Filter zurücksetzen', onclick: () => { state.filter = { text: '', level: '', host: '', restore: '' }; renderDashboard(true); } }) : null;
-  const heads = ['Status', 'Host / Job', 'Repository', 'Letzter Erfolg', 'Letzter Versuch', 'Archive', 'Größe', 'Restore-Test'];
+  const heads = ['Status', 'Host / Job', 'Repository', 'Letzter Erfolg', 'Letzter Versuch', 'Archive', 'Größe', 'Prüfungen'];
   fill();
   return h('section', { class: 'card', 'aria-label': 'Backups' },
     h('div', { class: 'toolbar' }, search, lvl, host, sort, reset, count),
@@ -366,7 +380,8 @@ function rowEl(r) {
       (la.result !== 'running' ? ` · Dauer ${dur(la.duration_seconds)}` : ''))] : [h('span', { class: 'muted', text: r.ping_configured ? 'keine Meldung' : 'nicht gemeldet' })]),
     cell('Archive', archives),
     cell('Größe', sz ? [h('div', { class: 'nowrap', text: bytes(sz.original) }), line2(`dedupliziert ${bytes(sz.deduplicated)}`)] : [h('span', { class: 'muted', text: 'unbekannt' })]),
-    cell('Restore-Test', restoreBadge(r.restore.state), r.restore.last ? line2(fmtDate(r.restore.last.finished_at || r.restore.last.started_at)) : null));
+    cell('Prüfungen', restoreBadge(r.restore.state), r.restore.last ? line2('Restore ' + fmtDate(r.restore.last.finished_at || r.restore.last.started_at)) : null,
+      r.check.state !== 'disabled' ? h('div', { class: 'mt-s' }, checkBadge(r.check.state)) : null));
 }
 
 function dayCell(c) {
@@ -409,6 +424,7 @@ async function renderDetail(id, background) {
         h('div', { class: 'toolbar flush' }, badge(r.status.level), restoreBadge(r.restore.state), refreshBtn))),
     h('div', { class: 'grid2' }, judgementCard(r), factsCard(r)),
     findingsCard(d),
+    verifyCard(d, id),
     historyChartCard(d),
     restoreCard(d, id),
     archivesCard(r),
@@ -563,6 +579,50 @@ function setupCard(d) {
     h('p', { class: 'muted small', text: `Hinweis: Die Adresse enthält ein Geheimnis – nicht öffentlich teilen. Der Job umfasst ${r.repo ? 'alle Repositorys dieser borgmatic-Konfiguration' : ''}.` }));
 }
 
+// ---------- verification ----------
+function verifyCard(d, id) {
+  const r = d.row;
+  const items = [];
+  // coverage
+  items.push(h('h3', { text: 'Abdeckung: erwartete Quellen im neuesten Archiv' }));
+  if (!r.expected_paths?.length) items.push(h('p', { class: 'muted small', text: 'Keine erwarteten Pfade konfiguriert (expected_paths). Damit fällt auf, wenn ein Volume beim Backup fehlt.' }));
+  else if (!r.coverage) items.push(h('p', { class: 'muted small', text: 'Wird beim nächsten Abfragen des Repositorys geprüft.' }));
+  else {
+    if (r.coverage.error) items.push(findingEl({ level: 'warning', summary: 'Abdeckung nicht prüfbar', detail: r.coverage.error }));
+    items.push(h('ul', { class: 'reasons' }, (r.coverage.paths || []).map((p) => {
+      const lvl = !p.present ? 'error' : p.empty ? 'warning' : 'ok';
+      const txt = !p.present ? 'fehlt im Archiv' : p.empty ? 'vorhanden, aber leer' : 'vorhanden';
+      return h('li', { class: `lv-${lvl}` }, icon(LEVEL[lvl].icon, LEVEL[lvl].label), h('div', {}, h('span', { class: 'mono', text: p.path }), ` – ${txt}`));
+    })));
+    items.push(h('p', { class: 'muted small', text: `Archiv ${r.coverage.archive}, geprüft ${fmtDate(r.coverage.checked_at)}` }));
+  }
+  // drift
+  items.push(h('h3', { text: 'Umfang im Vergleich' }));
+  if (r.drift) {
+    const pct = Math.abs(r.drift.change_percent) < 0.5 ? '±0' : nf1.format(r.drift.change_percent);
+    items.push(h('p', { class: r.drift.suspicious ? 'notice warn' : '', text: `Letzter Lauf: ${nf0.format(r.drift.files)} Dateien, üblich ${nf0.format(r.drift.median)} (${r.drift.change_percent >= 0.5 ? '+' : ''}${pct} %).${r.drift.suspicious ? ' Deutlich weniger als üblich – fehlt ein Volume?' : ''}` }));
+  } else items.push(h('p', { class: 'muted small', text: 'Noch zu wenige Läufe mit Statistik (borgmatic mit --stats), um Ausreißer zu erkennen.' }));
+  // integrity
+  items.push(h('h3', { text: 'Integrität (borg check)' }));
+  items.push(h('p', {}, checkBadge(r.check.state), ' ', r.check.text));
+  items.push(h('p', { class: 'muted small', text: r.check_plan ? `Prüfplan: ${r.check_plan}. Nur lesend (nie --repair), nie während eines Backups.` : 'Kein Prüfplan (check.schedule). Prüfungen sind optional; borg check sperrt das Repository für die Dauer der Prüfung.' }));
+  if (r.queried) items.push(h('button', { class: 'btn', type: 'button', onclick: async (e) => {
+    if (!confirm('borg check jetzt starten? Das Repository ist während der Prüfung gesperrt – ein in dieser Zeit startendes Backup kann scheitern.')) return;
+    e.currentTarget.disabled = true;
+    try { await api(`/api/repos/${id}/check`, { method: 'POST', body: { confirm: true } }); toast('Prüfung gestartet.'); renderDetail(id, true); } catch (ex) { toast(ex.message); e.currentTarget.disabled = false; }
+  } }, icon('shield'), 'Integrität jetzt prüfen'));
+  if (d.checks?.length) items.push(h('div', { class: 'table-wrap mt' }, h('table', { class: 'responsive' },
+    h('thead', {}, h('tr', {}, ['Ergebnis', 'Start', 'Dauer', 'Umfang', 'Auslöser', 'Befund'].map((t) => h('th', { text: t })))),
+    h('tbody', {}, d.checks.map((c) => h('tr', {},
+      h('td', { 'data-label': 'Ergebnis' }, checkBadge(c.state === 'passed' ? 'passed' : c.state === 'running' ? 'running' : 'failed')),
+      h('td', { 'data-label': 'Start', class: 'nowrap', text: fmtDate(c.started_at) }),
+      h('td', { 'data-label': 'Dauer', text: c.finished_at ? dur((new Date(c.finished_at) - new Date(c.started_at)) / 1000) : '–' }),
+      h('td', { 'data-label': 'Umfang', text: { repository: 'Repository', archives: 'Archive', both: 'beides' }[c.mode] || c.mode }),
+      h('td', { 'data-label': 'Auslöser', text: c.trigger }),
+      h('td', { 'data-label': 'Befund' }, (c.findings || []).map((f) => h('div', { class: 'small', text: f.summary })), c.log ? h('details', { class: 'log' }, h('summary', { text: 'Log' }), h('pre', { text: c.log })) : null)))))));
+  return h('section', { class: 'card' }, h('h2', { text: 'Prüfungen: Abdeckung, Umfang, Integrität' }), ...items);
+}
+
 // ---------- restore ----------
 function restoreCard(d, id) {
   const r = d.row, rs = r.restore;
@@ -580,6 +640,7 @@ function restoreCard(d, id) {
   return h('section', { class: 'card' },
     h('h2', {}, 'Wiederherstellung: ', restoreBadge(rs.state)),
     h('p', { text: rs.text }),
+    r.auto_restore ? h('p', { class: 'small', text: `Automatisch: ${r.auto_restore}. Ergebnisse erscheinen unten mit „automatisch“.` }) : null,
     h('p', { class: 'muted small', text: 'Getrennt vom Backup-Status bewertet. Ein bestandener Stichprobentest garantiert nicht, dass alle Daten wiederherstellbar sind.' }),
     list,
     r.restore_enabled && r.queried ? wizard(d, id) : h('p', { class: 'muted small', text: r.queried ? 'Restore-Tests sind für diesen Job nicht freigegeben (restore.enabled bzw. restore_test.enabled).' : 'Ohne Repository-Abfrage kein Restore-Test möglich.' }));
