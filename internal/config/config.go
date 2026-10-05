@@ -103,6 +103,7 @@ type Config struct {
 	Borg     Borg     `yaml:"borg"`
 	Defaults Defaults `yaml:"defaults"`
 	Restore  Restore  `yaml:"restore"`
+	Notify   Notify   `yaml:"notify"`
 	Hosts    []Host   `yaml:"hosts"`
 
 	Location *time.Location `yaml:"-"`
@@ -147,6 +148,16 @@ type Restore struct {
 	KeepFiles bool     `yaml:"keep_files"`
 }
 
+// Notify: messages when a status changes (ntfy and/or a JSON webhook).
+type Notify struct {
+	NtfyURL       string `yaml:"ntfy_url"`        // https://ntfy.example.com/backups
+	NtfyTokenFile string `yaml:"ntfy_token_file"` // access token, read from a file
+	WebhookURL    string `yaml:"webhook_url"`
+	MinLevel      string `yaml:"min_level"` // warning (default) | error
+}
+
+func (n Notify) Enabled() bool { return n.NtfyURL != "" || n.WebhookURL != "" }
+
 type Host struct {
 	Name string `yaml:"name"`
 	Jobs []Job  `yaml:"jobs"`
@@ -160,6 +171,11 @@ type Job struct {
 	Tolerance    Duration     `yaml:"tolerance"`
 	Repositories []Repository `yaml:"repositories"`
 	RestoreTest  RestoreTest  `yaml:"restore_test"`
+	// Paths (as stored in the archive, e.g. "source/immich") that must be in
+	// every new archive and not be empty – catches a volume missing at backup time.
+	ExpectedPaths []string `yaml:"expected_paths"`
+	// Warn when a run backs up this much less than usual (0.3 = 30 % fewer files).
+	DriftThreshold float64 `yaml:"drift_threshold"`
 
 	ID string `yaml:"-"`
 }
@@ -173,9 +189,24 @@ type Repository struct {
 	KnownHosts     string `yaml:"known_hosts"`
 	RemotePath     string `yaml:"remote_path"`
 	Query          *bool  `yaml:"query"` // false: no borg access, run reports only
+	Check          Check  `yaml:"check"`
 
 	ID string `yaml:"-"`
 }
+
+// Check: scheduled integrity check (borg check). Off unless a schedule is
+// set. borg check takes the repository lock – hence the time window, and it
+// never starts while a backup of the job is reported as running.
+type Check struct {
+	Schedule   Duration `yaml:"schedule"`    // e.g. 7d; 0 = no automatic check
+	Mode       string   `yaml:"mode"`        // repository | archives | both
+	Last       int      `yaml:"last"`        // archives part: only the newest N archives (0 = all)
+	VerifyData bool     `yaml:"verify_data"` // read all data (very slow)
+	Window     string   `yaml:"window"`      // "01:00-05:00" (local time); empty = any time
+	Timeout    Duration `yaml:"timeout"`
+}
+
+func (c Check) Enabled() bool { return c.Schedule > 0 }
 
 func (r Repository) Queried() bool { return r.Query == nil || *r.Query }
 
@@ -184,6 +215,12 @@ type RestoreTest struct {
 	ReferenceChecksums string   `yaml:"reference_checksums"` // sha256sum format
 	CompareRoot        string   `yaml:"compare_root"`        // read-only originals on this host
 	MaxAge             Duration `yaml:"max_age"`
+	// Automatic sample restores: every Schedule, SampleFiles random files below
+	// SamplePaths (archive paths) of the newest archive, inside Window.
+	Schedule    Duration `yaml:"schedule"`
+	SamplePaths []string `yaml:"sample_paths"`
+	SampleFiles int      `yaml:"sample_files"`
+	Window      string   `yaml:"window"`
 }
 
 // IDFor gives a stable, URL-safe id.
@@ -258,6 +295,9 @@ func (c *Config) applyDefaults() {
 	if c.Restore.MemoryMax <= 0 {
 		c.Restore.MemoryMax = 2 << 30
 	}
+	if c.Notify.MinLevel == "" {
+		c.Notify.MinLevel = "warning"
+	}
 	if c.Auth.SecureCookie == nil {
 		v := strings.HasPrefix(c.PublicURL, "https://")
 		c.Auth.SecureCookie = &v
@@ -269,8 +309,22 @@ func (c *Config) applyDefaults() {
 			def(&job.Interval, c.Defaults.Interval.D())
 			def(&job.Tolerance, c.Defaults.Tolerance.D())
 			def(&job.RestoreTest.MaxAge, c.Defaults.RestoreTestMaxAge.D())
+			if job.DriftThreshold <= 0 {
+				job.DriftThreshold = 0.3
+			}
+			if job.RestoreTest.SampleFiles <= 0 {
+				job.RestoreTest.SampleFiles = 5
+			}
+			for i, p := range job.ExpectedPaths {
+				job.ExpectedPaths[i] = strings.Trim(p, "/")
+			}
 			for r := range job.Repositories {
 				job.Repositories[r].ID = IDFor(c.Hosts[h].Name, job.Name, job.Repositories[r].Name)
+				ck := &job.Repositories[r].Check
+				if ck.Mode == "" {
+					ck.Mode = "repository"
+				}
+				def(&ck.Timeout, 6*time.Hour)
 			}
 		}
 	}
@@ -291,6 +345,11 @@ func (c *Config) validate() error {
 		}
 	}
 	c.Location = loc
+	switch c.Notify.MinLevel {
+	case "warning", "error":
+	default:
+		add("notify.min_level must be warning or error")
+	}
 	switch c.Borg.BypassLock {
 	case "auto", "always", "never":
 	default:
@@ -330,6 +389,12 @@ func (c *Config) validate() error {
 				}
 				seenToken[j.PingToken] = true
 			}
+			if _, _, err := ParseWindow(j.RestoreTest.Window); err != nil {
+				add("%s: restore_test.window: %v", where, err)
+			}
+			if j.RestoreTest.Schedule > 0 && len(j.RestoreTest.SamplePaths) == 0 {
+				add("%s: restore_test.schedule needs sample_paths", where)
+			}
 			if len(j.Repositories) == 0 {
 				add("%s: at least one repository", where)
 			}
@@ -350,6 +415,17 @@ func (c *Config) validate() error {
 				}
 				if strings.HasPrefix(r.Location, "-") {
 					add("%s/%s: invalid location", where, r.Name)
+				}
+				switch r.Check.Mode {
+				case "repository", "archives", "both":
+				default:
+					add("%s/%s: check.mode must be repository, archives or both", where, r.Name)
+				}
+				if _, _, err := ParseWindow(r.Check.Window); err != nil {
+					add("%s/%s: check.window: %v", where, r.Name, err)
+				}
+				if r.Check.Enabled() && !r.Queried() {
+					add("%s/%s: check needs repository access (query: false)", where, r.Name)
 				}
 			}
 		}
@@ -411,4 +487,37 @@ func (j Job) RestoreEnabled(global bool) bool {
 		return global && *j.RestoreTest.Enabled
 	}
 	return global
+}
+
+var windowRe = regexp.MustCompile(`^(\d{1,2}):(\d{2})\s*-\s*(\d{1,2}):(\d{2})$`)
+
+// ParseWindow reads "HH:MM-HH:MM" as minutes of the day; empty = whole day.
+// A window may span midnight ("22:00-04:00").
+func ParseWindow(s string) (from, to int, err error) {
+	if strings.TrimSpace(s) == "" {
+		return 0, 24 * 60, nil
+	}
+	m := windowRe.FindStringSubmatch(strings.TrimSpace(s))
+	if m == nil {
+		return 0, 0, fmt.Errorf("%q: erwartet HH:MM-HH:MM", s)
+	}
+	n := func(i int) int { v, _ := strconv.Atoi(m[i]); return v }
+	if n(1) > 23 || n(3) > 24 || n(2) > 59 || n(4) > 59 {
+		return 0, 0, fmt.Errorf("%q: ungültige Uhrzeit", s)
+	}
+	return n(1)*60 + n(2), n(3)*60 + n(4), nil
+}
+
+// InWindow: is t (in loc) inside the window?
+func InWindow(window string, t time.Time, loc *time.Location) bool {
+	from, to, err := ParseWindow(window)
+	if err != nil {
+		return false
+	}
+	lt := t.In(loc)
+	m := lt.Hour()*60 + lt.Minute()
+	if from <= to {
+		return m >= from && m < to
+	}
+	return m >= from || m < to // across midnight
 }

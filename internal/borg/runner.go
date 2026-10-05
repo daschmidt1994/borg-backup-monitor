@@ -563,5 +563,48 @@ func (r *Runner) Extract(ctx context.Context, repo *config.Repository, spec Extr
 	return string(se), code, err
 }
 
+// --- integrity check (scheduled or on request) ---------------------------------
+
+// Check runs "borg check" read-only: never --repair. It takes the repository
+// lock (no --bypass-lock) and gives up after --lock-wait if a backup holds it.
+func (r *Runner) Check(ctx context.Context, repo *config.Repository) (stderr string, code int, err error) {
+	in := r.Detect(ctx)
+	if !in.Supported {
+		return "", -1, errors.New(in.Error)
+	}
+	env, err := r.env(repo)
+	if err != nil {
+		return "", -1, err
+	}
+	args := CheckArgs(repo.Check)
+	if repo.RemotePath != "" {
+		args = append(args, "--remote-path", repo.RemotePath)
+	}
+	var prefix []string
+	if n, e := exec.LookPath("nice"); e == nil {
+		prefix = append(prefix, n, "-n", "15")
+	}
+	_, se, code, err := r.execT(ctx, repo.Check.Timeout.D(), env, prefix, "", args, 1<<20)
+	return string(se), code, err
+}
+
+// CheckArgs builds the borg check arguments for a configuration.
+func CheckArgs(c config.Check) []string {
+	args := []string{"check", "--log-json", "--lock-wait", "10"}
+	switch c.Mode {
+	case "repository":
+		args = append(args, "--repository-only")
+	case "archives":
+		args = append(args, "--archives-only")
+	}
+	if c.Last > 0 && c.Mode != "repository" {
+		args = append(args, "--last", strconv.Itoa(c.Last))
+	}
+	if c.VerifyData && c.Mode != "repository" {
+		args = append(args, "--verify-data")
+	}
+	return args
+}
+
 // HasPrlimit tells whether the memory limit can be enforced.
 func HasPrlimit() bool { _, err := exec.LookPath("prlimit"); return err == nil }

@@ -34,11 +34,24 @@ hosts:
       - name: system
         description: /etc, /home, Docker-Volumes
         ping_token: demo-nas-system-0001
+        expected_paths: [etc, home]
+        restore_test:
+          schedule: 7d
+          sample_paths: [home/anna/Dokumente, etc]
+          sample_files: 3
         repositories:
           - name: storagebox
             location: ssh://u123456@u123456.your-storagebox.de:23/./borg/nas
+            check:
+              schedule: 7d
+              mode: both
+              last: 3
+              window: "01:00-05:00"
           - name: usb-platte
             location: /mnt/usb-backup/borg/nas
+            check:
+              schedule: 30d
+              window: "01:00-05:00"
       - name: fotos
         description: Fotoarchiv, wöchentlich
         ping_token: demo-nas-fotos-0002
@@ -50,8 +63,9 @@ hosts:
   - name: webserver
     jobs:
       - name: www-und-datenbank
-        description: /var/www und MariaDB-Dump
+        description: /var/www, MariaDB-Dump, Uploads
         ping_token: demo-web-www-0003
+        expected_paths: [var/www, var/backups, srv/uploads]
         interval: 12h
         tolerance: 2h
         repositories:
@@ -223,6 +237,21 @@ func (b *Backend) Extract(ctx context.Context, repo *config.Repository, spec bor
 	return "", 0, nil
 }
 
+func (b *Backend) Check(ctx context.Context, repo *config.Repository) (string, int, error) {
+	select {
+	case <-time.After(3 * time.Second):
+	case <-ctx.Done():
+		return "", -1, ctx.Err()
+	}
+	if d := b.repos[repo.ID]; d != nil && d.err != nil {
+		return d.err.Finding.Detail, 2, nil
+	}
+	return "", 0, nil
+}
+
+func tp(t time.Time) *time.Time { return &t }
+func ip(i int) *int             { return &i }
+
 // Seed fills the store with a believable history and returns the backend.
 func Seed(c *config.Config, st *store.Store, now time.Time) *Backend {
 	b := &Backend{repos: map[string]*repoData{}}
@@ -356,7 +385,11 @@ INFO /etc/borgmatic/config.yaml: Successfully ran configuration file`, name, fil
 			continue // laptop was off
 		}
 		s := at(float64(d), 19, 5)
-		addRun(lap, s, 25*time.Minute, store.Success, 0, okLog("laptop-"+s.Format("2006-01-02"), 98000, "61.2 GB", "502 MB"))
+		files := 98000
+		if d == 4 {
+			files = 31200 // the external disk was not mounted
+		}
+		addRun(lap, s, 25*time.Minute, store.Success, 0, okLog("laptop-"+s.Format("2006-01-02"), files, "61.2 GB", "502 MB"))
 	}
 	b.repos[nasr.ID] = &repoData{archives: archives(lap, 40, 24*time.Hour, at(4, 19, 6))}
 	f12 := at(12, 18, 0)
@@ -387,9 +420,15 @@ INFO /etc/borgmatic/config.yaml: Successfully ran configuration file`, name, fil
 
 	// raspberrypi: nothing known yet (no report, repository not queried)
 
+	c2 := at(2, 3, 41)
+	tests = append(tests, &store.RestoreTest{ID: "demo-rt-5", RepoID: sb.ID, JobID: sys.ID, Archive: "nas-" + at(2, 2, 30).Format("2006-01-02T02:30:00"),
+		Paths: []string{"home/anna/Dokumente/Notizen.txt", "etc/hosts", "home/anna/.bashrc"}, StartedAt: at(2, 3, 40), FinishedAt: &c2,
+		StartedBy: "automatisch", State: "passed", Removed: true, Bytes: 6040, FileCount: 3, Verified: 3, Limits: "max. 50 MiB"})
+	checks := []*store.CheckResult{{ID: "demo-ck-1", RepoID: sb.ID, StartedAt: at(3, 1, 10), FinishedAt: tp(at(3, 2, 52)), State: "passed", Mode: "both", Trigger: "zeitplan", ExitCode: ip(0)}}
 	_ = st.Update(func(s *store.State) {
 		s.Runs = runs
 		s.RestoreTests = tests
+		s.Checks = checks
 	})
 	// first query right away, so the dashboard has repository data
 	ctx := context.Background()
@@ -411,6 +450,7 @@ INFO /etc/borgmatic/config.yaml: Successfully ran configuration file`, name, fil
 			} else {
 				t := snap.CheckedAt
 				snap.LastGoodAt = &t
+				snap.Coverage = demoCoverage(j.Job, snap)
 				if d := b.repos[r.ID]; d != nil && d.sizes != nil {
 					sz := *d.sizes
 					sz.At = now.Add(-2 * time.Hour)
@@ -421,4 +461,22 @@ INFO /etc/borgmatic/config.yaml: Successfully ran configuration file`, name, fil
 		}
 	}
 	return b
+}
+
+func demoCoverage(job *config.Job, snap *store.RepoSnapshot) *store.Coverage {
+	if len(job.ExpectedPaths) == 0 || snap.Latest == nil {
+		return nil
+	}
+	c := &store.Coverage{Archive: snap.Latest.Name, CheckedAt: snap.CheckedAt}
+	for _, p := range job.ExpectedPaths {
+		cp := store.CoveragePath{Path: p}
+		for _, it := range demoFiles {
+			if it.Path == p || strings.HasPrefix(it.Path, p+"/") {
+				cp.Present = true
+				cp.Entries++
+			}
+		}
+		c.Paths = append(c.Paths, cp)
+	}
+	return c
 }

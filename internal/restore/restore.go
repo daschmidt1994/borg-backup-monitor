@@ -85,6 +85,8 @@ func (m *Manager) limits() Limits {
 		MemoryEnforced: borg.HasPrlimit(), KeepFiles: m.Cfg.Restore.KeepFiles}
 }
 
+func newID() string { return monitor.NewID() }
+
 func validArchiveName(s string) bool {
 	return s != "" && len(s) <= 255 && !strings.HasPrefix(s, "-") && !strings.ContainsAny(s, "/\x00\n\r")
 }

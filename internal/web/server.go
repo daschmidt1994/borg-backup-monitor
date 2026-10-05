@@ -126,6 +126,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/repos/{id}", s.auth(s.detail))
 	mux.HandleFunc("POST /api/repos/{id}/refresh", s.auth(s.refresh))
 	mux.HandleFunc("GET /api/repos/{id}/files", s.auth(s.files))
+	mux.HandleFunc("POST /api/repos/{id}/check", s.auth(s.check))
 	mux.HandleFunc("GET /api/runs/{id}/log", s.auth(s.runLog))
 	mux.HandleFunc("POST /api/restore-tests/plan", s.auth(s.planRestore))
 	mux.HandleFunc("POST /api/restore-tests", s.auth(s.startRestore))
@@ -311,6 +312,24 @@ func (s *Server) refresh(w http.ResponseWriter, r *http.Request) {
 	}
 	d, _ := s.Mon.Detail(r.PathValue("id"))
 	writeJSON(w, http.StatusOK, d)
+}
+
+// check starts borg check by hand (read-only, never --repair).
+func (s *Server) check(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Confirm bool `json:"confirm"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1024)).Decode(&in); err != nil || !in.Confirm {
+		fail(w, http.StatusBadRequest, "Start muss bestätigt werden")
+		return
+	}
+	c, err := s.Mon.RunCheck(r.PathValue("id"), "manuell")
+	if err != nil {
+		fail(w, http.StatusConflict, err.Error())
+		return
+	}
+	s.Log.Info("borg check started", "user", userOf(r), "repo", c.RepoID)
+	writeJSON(w, http.StatusAccepted, c)
 }
 
 func (s *Server) files(w http.ResponseWriter, r *http.Request) {

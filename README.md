@@ -9,7 +9,7 @@ Grafische Weboberfläche zum **Überwachen** vorhandener [Borg](https://www.borg
 
 ![Übersicht](docs/screenshots/dashboard.png)
 
-> **Nur Monitoring.** Die Anwendung erstellt, startet, löscht, prunt, kompaktiert oder repariert keine Backups und ändert keine Konfiguration. Zeitpläne und borgmatic-Konfigurationen bleiben, wo sie sind. Die einzige aktive Funktion ist ein **kontrollierter Restore-Test** einzelner Dateien in ein isoliertes Temp-Verzeichnis.
+> **Nur Monitoring.** Die Anwendung erstellt, startet, löscht, prunt, kompaktiert oder repariert keine Backups und ändert keine Konfiguration. Zeitpläne und borgmatic-Konfigurationen bleiben, wo sie sind. Aktiv wird er nur für Prüfungen: kontrollierte **Restore-Tests** einzelner Dateien in ein isoliertes Temp-Verzeichnis (manuell oder geplant) und optional geplantes **`borg check`** (nur lesend, nie `--repair`).
 
 ## Inhalt
 
@@ -18,6 +18,7 @@ Grafische Weboberfläche zum **Überwachen** vorhandener [Borg](https://www.borg
 - [borgmatic melden lassen](#borgmatic-melden-lassen)
 - [Wie der Status bewertet wird](#wie-der-status-bewertet-wird)
 - [Restore-Test](#restore-test)
+- [Backup-Verifier](#backup-verifier)
 - [Sicherheit](#sicherheit)
 - [Datenquellen und unterstützte Versionen](#datenquellen-und-unterstützte-versionen)
 - [Technik und Begründung](#technik-und-begründung)
@@ -165,6 +166,26 @@ Schutzmaßnahmen:
 - Dokumentiert werden Zeitpunkt, Person, Archiv, Auswahl, Ziel, Grenzen, wiederhergestellte Dateien mit Größe und SHA-256, Abgleich, Fehler.
 
 > **Ein bestandener Stichprobentest zeigt nur, dass genau diese Dateien aus genau diesem Archiv wiederhergestellt werden konnten. Er garantiert nicht, dass alle Daten wiederherstellbar sind.**
+
+## Backup-Verifier
+
+Über die Meldungen hinaus prüft der Monitor auf Wunsch selbst, ob die Sicherungen **vollständig** und **lesbar** sind:
+
+| Prüfung | Wie | Kosten |
+|---|---|---|
+| **Abdeckung** (`expected_paths`) | Nach jedem neuen Archiv wird jeder erwartete Pfad (z. B. `source/immich`) im Archiv nachgeschlagen. Fehlt er → **Fehler**, ist er leer (nur der Mount-Punkt) → **Warnung**. Genau das fällt auf, wenn ein Volume beim Backup nicht eingebunden war. | sehr gering (`borg list` auf wenige Einträge) |
+| **Umfang** (`drift_threshold`) | Der letzte Lauf wird mit dem Median der vorherigen verglichen (Dateien laut `--stats`). Deutlich weniger → **Warnung** „Fehlt ein Volume?“. | keine |
+| **Log-Muster** | Meldungen wie `failedPrepareSourcePaths` oder „source directories do not exist“ werden als „Quellverzeichnis fehlte beim Backup“ erkannt. | keine |
+| **Automatische Restore-Tests** (`restore_test.schedule`) | Im Zeitfenster zufällige Dateien aus dem neuesten Archiv wiederherstellen und prüfen – mit denselben Schutzmaßnahmen wie der manuelle Test. Findet die Stichprobe in einem Pfad nichts, wird das als fehlgeschlagener Test festgehalten. | gering, begrenzt |
+| **Integrität** (`check.schedule`) | `borg check` (Repository, Archive oder beides; optional nur die neuesten N Archive, optional `--verify-data`) – **nie `--repair`**. | hoch – daher nur geplant im Zeitfenster |
+
+`borg check` sperrt das Repository für die Dauer der Prüfung. Deshalb startet es nur im konfigurierten Zeitfenster, nie während ein Backup des Jobs als laufend gemeldet ist, und gibt nach 10 Sekunden auf, wenn ein Backup die Sperre hält. Ein Backup, das *während* der Prüfung startet, wartet entsprechend seiner `lock_wait`-Einstellung – das Zeitfenster sollte also außerhalb der Backup-Zeiten liegen. Für `borg check` muss das Repository **beschreibbar** eingebunden sein (Sperrdatei); alle anderen Prüfungen funktionieren mit `:ro`.
+
+Ergebnisse stehen in der Tabelle (Spalte „Prüfungen“) und in der Detailansicht; eine fehlgeschlagene Prüfung macht den Status zum **Fehler**.
+
+### Benachrichtigungen
+
+Mit `notify.ntfy_url` (und optional `ntfy_token_file`) bzw. `notify.webhook_url` meldet der Monitor jeden Statuswechsel: schlechter als `min_level`, und wieder „OK“. Gleichbleibende Zustände werden nicht wiederholt.
 
 ## Sicherheit
 

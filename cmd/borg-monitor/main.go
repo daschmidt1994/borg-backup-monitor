@@ -100,6 +100,10 @@ func main() {
 	}
 	mon := monitor.New(cfg, st, backend, log)
 	mon.Demo = *demoMode
+	if cfg.Notify.Enabled() && !*demoMode {
+		mon.Notifier = &monitor.HTTPNotifier{Cfg: cfg.Notify}
+	}
+	mon.RecoverChecks()
 	rm := restore.New(cfg, st, backend, mon)
 	rm.Recover()
 	srv, err := web.New(cfg, mon, rm, log, *demoMode)
@@ -110,6 +114,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	go mon.Run(ctx)
+	go rm.RunScheduler(ctx)
 	hs := &http.Server{Addr: cfg.Listen, Handler: srv.Handler(), ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout: 60 * time.Second, WriteTimeout: 5 * time.Minute, IdleTimeout: 2 * time.Minute}
 	go func() {

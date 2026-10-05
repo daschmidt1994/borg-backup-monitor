@@ -82,6 +82,9 @@ type EvalInput struct {
 	PingConfigured   bool         // job has a ping token
 	Runs             []*store.Run // oldest first
 	Snap             *store.RepoSnapshot
+	ExpectedPaths    []string     // sources that must be in every archive
+	DriftThreshold   float64      // 0.3 = warn at 30 % fewer files than usual
+	Check            *CheckStatus // borg check, if any
 }
 
 type Eval struct {
@@ -328,6 +331,28 @@ func Evaluate(in EvalInput) Eval {
 					"Schreibt der borgmatic-Job wirklich in dieses Repository? Wurde das Archiv gelöscht?")
 			}
 		}
+	}
+
+	// --- verification: coverage, drift, integrity ---
+	if in.Queried {
+		reasons = append(reasons, coverageReasons(in.ExpectedPaths, snap)...)
+	}
+	if d := computeDrift(in.Runs, in.DriftThreshold); d != nil && d.Suspicious && e.LastOK != nil {
+		add(Warn, fmt.Sprintf("Letzter Lauf sicherte %d Dateien – üblich sind etwa %d (%.0f %%). Fehlt ein Volume?", d.Files, d.Median, d.ChangePct),
+			"Quellen im borgmatic-Container prüfen; erwartete Pfade lassen sich mit expected_paths überwachen.")
+	}
+	if c := in.Check; c != nil && c.State == "failed" && c.Last != nil {
+		txt := "Integritätsprüfung (borg check) fehlgeschlagen am " + fmtTime(c.Last.StartedAt)
+		hint := ""
+		if len(c.Last.Findings) > 0 {
+			txt += ": " + c.Last.Findings[0].Summary
+			hint = c.Last.Findings[0].Hint
+		}
+		add(Err, txt, hint)
+	}
+	if c := in.Check; c != nil && c.State == "passed" && c.Last != nil {
+		t := *c.Last.FinishedAt
+		basis = append(basis, Basis{Source: "Integritätsprüfung (borg check)", Text: "ohne Befund", At: &t})
 	}
 
 	// --- result ---

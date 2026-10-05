@@ -26,6 +26,7 @@ func (fake) Detect(context.Context) *borg.Info { return &borg.Info{Supported: tr
 func (fake) List(context.Context, *config.Repository) (*store.RepoSnapshot, *borg.Error) {
 	return &store.RepoSnapshot{OK: true}, nil
 }
+func (fake) Check(context.Context, *config.Repository) (string, int, error)        { return "", 0, nil }
 func (fake) Sizes(context.Context, *config.Repository) (*store.Sizes, *borg.Error) { return nil, nil }
 
 var items = []borg.Item{
@@ -233,5 +234,52 @@ func TestPlanRejectsTooLarge(t *testing.T) {
 	}
 	if _, err := m.Start(p.ID, "x"); err == nil {
 		t.Fatal("blocked plan started")
+	}
+}
+
+func TestAutomaticSampleRestore(t *testing.T) {
+	m, repo := setup(t, fake{}, "")
+	job := m.Cfg.Jobs()[0].Job
+	job.RestoreTest.SamplePaths = []string{"etc"}
+	job.RestoreTest.SampleFiles = 1
+	_ = m.Store.Update(func(s *store.State) {
+		snap := &store.RepoSnapshot{RepoID: repo, OK: true}
+		snap.SetArchives([]store.Archive{{Name: "a1", Start: time.Now()}})
+		s.Repos[repo] = snap
+	})
+	_, r, _ := m.Cfg.RepoByID(repo)
+	if err := m.autoTest(context.Background(), job, r); err != nil {
+		t.Fatal(err)
+	}
+	var got *store.RestoreTest
+	for i := 0; i < 100 && (got == nil || got.State == "running"); i++ {
+		time.Sleep(50 * time.Millisecond)
+		m.Store.Read(func(s *store.State) {
+			if n := len(s.RestoreTests); n > 0 {
+				c := *s.RestoreTests[n-1]
+				got = &c
+			}
+		})
+	}
+	if got == nil || got.StartedBy != AutoUser || len(got.Paths) != 1 || got.State != "passed-unverified" {
+		t.Fatalf("auto test: %+v", got)
+	}
+	// a sample path that is missing in the archive → recorded as failed
+	job.RestoreTest.SamplePaths = []string{"srv/fehlt"}
+	for i := 0; i < 100; i++ { // the first test has to release the slot
+		m.mu.Lock()
+		busy := m.running
+		m.mu.Unlock()
+		if !busy {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if err := m.autoTest(context.Background(), job, r); err != nil {
+		t.Fatal(err)
+	}
+	m.Store.Read(func(s *store.State) { c := *s.RestoreTests[len(s.RestoreTests)-1]; got = &c })
+	if got.State != "failed" || !strings.Contains(got.Findings[0].Summary, "fehlt die Quelle") {
+		t.Fatalf("missing sample path: %+v", got)
 	}
 }
